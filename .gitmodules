@@ -1,0 +1,3 @@
+[submodule "auto-nn"]
+	path = auto-nn
+	url = git@github.com:lwimala/auto-nn.git
