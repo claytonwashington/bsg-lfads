@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import torch
 from torch import nn
 
@@ -79,3 +81,137 @@ class BidirectionalClippedGRU(nn.Module):
         output = torch.cat([output_fwd, output_bwd], dim=2)
         h_n = torch.stack([hn_fwd, hn_bwd])
         return output, h_n
+
+
+class SOCCell(nn.Module):
+    """Discretized Euler-step SOC (Stability-Optimized Circuit) cell.
+
+    Implements a fixed E/I recurrent network driven by time-varying tonic
+    inputs (I_e) and gain modulation (g). The weight matrix W is frozen
+    (registered as a buffer, never updated by the optimizer).
+
+    Dynamics (from Hennequin et al., Nature 2018):
+        τ V̇ᵢ(t) = -Vᵢ(t) + Σⱼ Wᵢⱼ r[gⱼ(t), Vⱼ(t)] + Iₑ(t)
+
+    Activation function (piecewise asymmetric tanh):
+        r(g, V) = r0 * tanh(g*V / r0),              if V < 0
+                  (rmax - r0) * tanh(g*V / (rmax-r0)), if V >= 0
+
+    Where r0 is the baseline firing rate and rmax is the maximum firing rate.
+    The gain g modulates the slope of the activation around V=0.
+
+    Convention: W[i, j] = connection from neuron j → neuron i (post, pre).
+    First N//2 columns are excitatory (positive), last N//2 are inhibitory (negative).
+
+    Parameters
+    ----------
+    N : int
+        Number of neurons in the SOC population. Must be even.
+    dt : float
+        Euler integration step size (ms).
+    tau : float
+        Membrane time constant (ms). Default 50ms, tunable via PBT.
+    r0 : float
+        Baseline firing rate (Hz). Default 20.
+    rmax : float
+        Maximum firing rate (Hz). Default 100.
+    W_init_path : str
+        Path to a .pt file containing the pre-computed SOC weight matrix
+        of shape (N, N), saved via ``torch.save(W_tensor, path)``.
+    """
+
+    def __init__(
+        self,
+        N: int,
+        dt: float,
+        tau: float,
+        W_init_path: str,
+        r0: float = 20.0,
+        rmax: float = 100.0,
+    ):
+        super().__init__()
+        assert N % 2 == 0, f"SOCCell requires even N, got {N}"
+        self.N = N
+        self.dt = dt
+        self.tau = tau
+        self.r0 = r0
+        self.rmax = rmax
+
+        # Load pre-computed SOC weight matrix
+        W = torch.load(W_init_path, map_location="cpu", weights_only=True)
+        assert W.shape == (N, N), (
+            f"Expected W shape ({N}, {N}), got {W.shape}"
+        )
+        W = W.float()
+
+        # Enforce E/I sign convention
+        W[:, : N // 2] = torch.abs(W[:, : N // 2])   # excitatory columns
+        W[:, N // 2 :] = -torch.abs(W[:, N // 2 :])   # inhibitory columns
+
+        # CRITICAL: register as buffer — NOT nn.Parameter
+        self.register_buffer("W", W)  # (N, N), requires_grad=False
+
+    def _activation(self, v: torch.Tensor, g: torch.Tensor) -> torch.Tensor:
+        """Piecewise asymmetric tanh activation with gain modulation.
+
+        Matches auto_nn/model.py f_nonlinear and the formulation in
+        Hennequin et al., Nature 2018 (see also Stroud et al., 2018).
+
+        Parameters
+        ----------
+        v : Tensor, shape (B, N)
+            Membrane voltage.
+        g : Tensor, shape (B, N)
+            Per-neuron gain (strictly positive).
+
+        Returns
+        -------
+        r : Tensor, shape (B, N)
+            Firing rates.
+        """
+        scaled = g * v  # (B, N)
+        neg_branch = self.r0 * torch.tanh(scaled / self.r0)
+        pos_branch = (self.rmax - self.r0) * torch.tanh(
+            scaled / (self.rmax - self.r0)
+        )
+        return torch.where(v < 0, neg_branch, pos_branch)
+
+    def forward(
+        self,
+        v_prev: torch.Tensor,
+        I_e: torch.Tensor,
+        g: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """One Euler step of the SOC dynamics.
+
+        Parameters
+        ----------
+        v_prev : Tensor, shape (B, N)
+            Previous membrane voltage.
+        I_e : Tensor, shape (B, N)
+            Tonic input current from the controller.
+        g : Tensor, shape (B, N)
+            Per-neuron gain (must be strictly positive; apply softplus upstream).
+
+        Returns
+        -------
+        v_next : Tensor, shape (B, N)
+            Updated membrane voltage.
+        r_prev : Tensor, shape (B, N)
+            Firing rates at the *current* step (used for readout).
+        """
+        # Compute firing rates via piecewise asymmetric tanh
+        r_prev = self._activation(v_prev, g)  # (B, N)
+
+        # Recurrent input: W @ r  (using W[i,j] = j→i convention)
+        # (N, N) @ (B, N, 1) → (B, N, 1) → (B, N)
+        Wr = (self.W @ r_prev.unsqueeze(-1)).squeeze(-1)  # (B, N)
+
+        # Total drive: τ V̇ = -V + W·r + I_e
+        dv = -v_prev + Wr + I_e  # (B, N)
+
+        # Euler integration
+        alpha = self.dt / self.tau
+        v_next = v_prev + alpha * dv  # (B, N)
+
+        return v_next, r_prev

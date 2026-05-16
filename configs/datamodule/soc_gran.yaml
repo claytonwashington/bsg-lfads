@@ -1,0 +1,4 @@
+_target_: lfads_torch.soc_datamodules.SOCDataModule
+spike_file_pattern: /home/cbwash2/bsg-lfads/datasets/soc_gran/neural/lfads_torch_readin*_neural.h5
+emg_file_pattern: /home/cbwash2/bsg-lfads/datasets/soc_gran/emg/lfads_torch_readin*_emg.h5
+batch_size: 256

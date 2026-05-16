@@ -1,0 +1,74 @@
+_target_: lfads_torch.soc_model.LFADS_SOC
+
+# --------- architecture --------- #
+encod_data_dim: 20
+encod_seq_len: 100
+recon_seq_len: ${model.encod_seq_len}
+ext_input_dim: 0
+ic_enc_seq_len: 0
+ic_enc_dim: 128
+ci_enc_dim: 128
+ci_lag: 1
+con_dim: 64
+co_dim: 16
+ic_dim: 64
+
+# --------- SOC cell --------- #
+soc_N: 200
+soc_dt: 0.5
+soc_tau: 50.0    # PBT range: 10–200 ms
+soc_r0: 20.0     # PBT range: 5–30 Hz
+soc_rmax: 100.0  # PBT range: 50–200 Hz
+soc_W_path: /home/cbwash2/bsg-lfads/weights/W_soc_200.pt
+
+# --------- readin / readout --------- #
+readin:
+  _target_: lfads_torch.modules.readin_readout.MultisessionReadin
+  datafile_pattern: ${datamodule.spike_file_pattern}
+
+readout:
+  _target_: lfads_torch.modules.readout.MultisessionDualReadout
+  spike_file_pattern: ${datamodule.spike_file_pattern}
+  emg_file_pattern: ${datamodule.emg_file_pattern}
+  soc_N: ${model.soc_N}
+
+# --------- priors / posteriors --------- #
+variational: True
+co_prior:
+  _target_: lfads_torch.modules.priors.AutoregressiveMultivariateNormal
+  tau: 10.0
+  nvar: 0.1
+  shape: ${model.co_dim}
+ic_prior:
+  _target_: lfads_torch.modules.priors.MultivariateNormal
+  mean: 0
+  variance: 0.1
+  shape: ${model.ic_dim}
+ic_post_var_min: 1.0e-4
+
+# --------- misc --------- #
+dropout_rate: 0.02
+cell_clip: 5.0
+loss_scale: 1.0e+4
+recon_reduce_mean: True
+
+# --------- learning rate --------- #
+lr_init: 4.0e-3
+lr_stop: 1.0e-5
+lr_decay: 0.95
+lr_patience: 6
+lr_adam_beta1: 0.9
+lr_adam_beta2: 0.999
+lr_adam_epsilon: 3.1623e-5
+lr_scheduler: False
+
+# --------- regularization --------- #
+weight_decay: 0.0
+l2_start_epoch: 0
+l2_increase_epoch: 50
+l2_ic_enc_scale: 0.0
+l2_ci_enc_scale: 0.0
+kl_start_epoch: 0
+kl_increase_epoch: 50
+kl_ic_scale: 0.0
+kl_co_scale: 0.0

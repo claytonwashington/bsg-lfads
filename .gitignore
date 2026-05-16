@@ -4,6 +4,9 @@ datasets
 tutorials/multisession/lfads-output
 .DS_Store
 
+# Training runs (large checkpoints, H5s, analysis pickles — synced to NAS)
+runs/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
